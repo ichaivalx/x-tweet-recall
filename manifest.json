@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "XRecall",
+  "short_name": "XRecall",
+  "version": "2.1.0",
+  "description": "自动保存你看过或交互过的 X 推文，并在本机保留可搜索的视觉预览。",
+  "permissions": [
+    "storage",
+    "clipboardWrite",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "scripts/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.x.com/*",
+        "https://*.twitter.com/*"
+      ],
+      "js": [
+        "scripts/shared.js",
+        "scripts/recorder.js",
+        "scripts/feed.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "打开 XRecall",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>XRecall</title>
+    <link rel="stylesheet" href="styles/popup.css">
+    <script src="scripts/shared.js" defer></script>
+    <script src="scripts/preview-db.js" defer></script>
+    <script src="scripts/popup.js" defer></script>
+  </head>
+  <body>
+    <main id="shell" class="shell">
+      <header class="masthead">
+        <div class="toolbar">
+          <label class="search-bar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.5" cy="10.5" r="6.5"></circle>
+              <path d="m15.5 15.5 5 5"></path>
+            </svg>
+            <span class="sr-only">搜索保存的推文</span>
+            <input
+              id="search"
+              type="search"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="搜索保存的推文"
+              aria-controls="keypad"
+            >
+          </label>
+
+          <button
+            id="toggle-previews"
+            class="toolbar__button toolbar__previews"
+            type="button"
+            title="隐藏预览"
+            aria-label="隐藏所有图片预览"
+            aria-pressed="true"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect>
+              <circle cx="8.5" cy="9" r="1.5"></circle>
+              <path d="m5.5 17 4.5-4 3.2 2.8 2.3-2.1 3 3.3"></path>
+            </svg>
+          </button>
+
+          <button
+            id="open-cleanup"
+            class="toolbar__button toolbar__cleanup"
+            type="button"
+            title="删除记录"
+            aria-label="删除保存的推文记录"
+            aria-controls="cleanup"
+            aria-expanded="false"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 7h14M9 7V4h6v3M8 10v9M12 10v9M16 10v9M7 7l1 14h8l1-14"></path>
+            </svg>
+          </button>
+        </div>
+
+        <div id="keypad" class="keypad" role="group" aria-label="数字键盘" data-open="false" inert>
+          <button class="keypad__key" type="button" data-insert="1">1</button>
+          <button class="keypad__key" type="button" data-insert="2">2</button>
+          <button class="keypad__key" type="button" data-insert="3">3</button>
+          <button class="keypad__key" type="button" data-insert="4">4</button>
+          <button class="keypad__key" type="button" data-insert="5">5</button>
+          <button class="keypad__key" type="button" data-insert="6">6</button>
+          <button class="keypad__key" type="button" data-insert="7">7</button>
+          <button class="keypad__key" type="button" data-insert="8">8</button>
+          <button class="keypad__key" type="button" data-insert="9">9</button>
+          <button class="keypad__key" type="button" data-insert="0">0</button>
+          <button class="keypad__key keypad__key--mark" type="button" data-insert=":" aria-label="冒号">:</button>
+          <button class="keypad__key keypad__key--mark" type="button" data-action="backspace" title="退格" aria-label="退格">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6h10a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 18H9l-5.5-6Z"></path>
+              <path d="m11.5 9.5 5 5M16.5 9.5l-5 5"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <section id="records" class="records" aria-label="保存的推文">
+        <div id="records-end" class="records__end" aria-hidden="true"></div>
+      </section>
+
+      <section id="empty" class="empty-state" hidden>
+        <p id="empty-copy">还没有保存的推文</p>
+      </section>
+
+      <div id="cleanup" class="cleanup" role="dialog" aria-labelledby="cleanup-title" hidden>
+        <div class="cleanup__head">
+          <p id="cleanup-title" class="cleanup__title">删除记录</p>
+          <p id="cleanup-summary" class="cleanup__summary"></p>
+        </div>
+        <div id="cleanup-options" class="cleanup__options"></div>
+        <div id="cleanup-confirm" class="cleanup__confirm" hidden>
+          <p id="cleanup-message" class="cleanup__message"></p>
+          <div class="cleanup__buttons">
+            <button id="cleanup-cancel" class="cleanup__button" type="button">返回</button>
+            <button id="cleanup-submit" class="cleanup__button cleanup__button--danger" type="button">删除</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+# Chrome 打包与签名产物
+*.crx
+*.pem
+
+# 本地依赖、日志与系统文件
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
