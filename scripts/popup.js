@@ -86,8 +86,18 @@
   elements.search.addEventListener("click", () => setKeypadOpen(true));
   elements.keypad.addEventListener("mousedown", (event) => event.preventDefault());
   elements.keypad.addEventListener("click", handleKeypadClick);
-  elements.records.addEventListener("wheel", () => setKeypadOpen(false), {
-    passive: true
+  elements.records.addEventListener("wheel", (event) => {
+    if (!isKeypadOpen()) {
+      return;
+    }
+    // 向上滚动时这一格只用来收起键盘，否则列表上移与内容下滚同时发生会来回抖动。
+    const holdContent = event.deltaY < 0 && elements.records.scrollTop > 0;
+    if (holdContent) {
+      event.preventDefault();
+    }
+    setKeypadOpen(false, { holdContent });
+  }, {
+    passive: false
   });
   elements.records.addEventListener("pointerdown", (event) => {
     // 直接按住列表本身只可能是拖动滚动条。
@@ -607,25 +617,34 @@
     return elements.keypad.dataset.open === "true";
   }
 
-  function setKeypadOpen(open) {
+  function setKeypadOpen(open, { holdContent = false } = {}) {
     if (isKeypadOpen() === open) {
       return;
     }
 
     const list = elements.records.hidden ? elements.empty : elements.records;
     const startOffset = currentTranslateY(list);
+    const startScrollTop = list.scrollTop;
     elements.keypad.dataset.open = String(open);
     elements.keypad.inert = !open;
     elements.shell.classList.toggle("shell--keypad-open", open);
 
-    // 布局一次性移动到位，再从原视觉位置滑过去，动画只改 transform。
+    // 布局一次性移动到位，再从原视觉位置滑过去，动画只改 transform 和裁剪。
     const shift = elements.keypad.offsetHeight * (open ? -1 : 1);
+    // 收起时可用滚动位置抵消列表上移：内容停在原处，只有列表上缘向上展开。
+    const held = holdContent && !open ? Math.min(shift, startScrollTop) : 0;
+    if (held > 0) {
+      list.scrollTop = startScrollTop - held;
+    }
     for (const animation of list.getAnimations()) {
       animation.cancel();
     }
     if (!reducedMotion.matches) {
       list.animate(
-        [{ transform: `translateY(${startOffset + shift}px)` }, { transform: "none" }],
+        [
+          { transform: `translateY(${startOffset + shift - held}px)`, clipPath: `inset(${held}px 0 0)` },
+          { transform: "none", clipPath: "inset(0)" }
+        ],
         { duration: 260, easing: "cubic-bezier(0.32, 0.72, 0, 1)" }
       );
     }

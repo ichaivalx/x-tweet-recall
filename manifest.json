@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "XRecall",
   "short_name": "XRecall",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "自动保存你看过或交互过的 X 推文，并在本机保留可搜索的视觉预览。",
   "permissions": [
     "storage",
