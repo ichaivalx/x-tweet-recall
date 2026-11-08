@@ -9,7 +9,8 @@
   const MEDIA_READY_TIMEOUT_MS = 8_000;
   const MEDIA_READY_POLL_MS = 120;
   const MAX_ENRICHMENT_ATTEMPTS = 30;
-  const recordedFeedTweetIds = new Set();
+  // Feed 中本次访问所归入的时间点；与它相差不足合并窗口时不再重复读写存储。
+  const feedVisitTimes = new Map();
   const pendingFeedTweetIds = new Set();
   const requestedPreviewTweetIds = new Set();
   const pendingPreviewTweetIds = new Set();
@@ -98,7 +99,7 @@
         : hintedMedia;
 
     return {
-      schemaVersion: 1,
+      schemaVersion: shared.RECORD_SCHEMA_VERSION,
       id: route.id,
       url: route.canonicalUrl,
       handle: details?.handle || route.handle || existing?.handle || "",
@@ -107,9 +108,7 @@
       language: details?.language || existing?.language || "",
       media: nextMedia,
       tweetedAt: details?.tweetedAt || existing?.tweetedAt || "",
-      firstVisitedAt: existing?.firstVisitedAt || now,
-      lastVisitedAt: now,
-      visitCount: Math.max(0, Number(existing?.visitCount) || 0) + 1
+      visits: shared.addVisit(existing, now)
     };
   }
 
@@ -164,20 +163,24 @@
             replaceExisting: hasVisualMedia(details)
           })
         : false;
-    const nextRecord = {
-      ...session.record,
-      handle: details.handle || session.record.handle,
-      author: details.author || session.record.author,
-      text: details.text || session.record.text,
-      language: details.language || session.record.language,
-      media: details.media.length ? details.media : session.record.media,
-      tweetedAt: details.tweetedAt || session.record.tweetedAt
-    };
+    const storageKey = shared.makeStorageKey(session.id);
 
     try {
-      await chrome.storage.local.set({
-        [shared.makeStorageKey(session.id)]: nextRecord
-      });
+      // 以存储中的最新记录为底，避免覆盖其他页面期间追加的访问时间。
+      const stored = await chrome.storage.local.get(storageKey);
+      const base = shared.isTweetRecord(stored[storageKey])
+        ? stored[storageKey]
+        : session.record;
+      const nextRecord = {
+        ...base,
+        handle: details.handle || base.handle,
+        author: details.author || base.author,
+        text: details.text || base.text,
+        language: details.language || base.language,
+        media: details.media.length ? details.media : base.media,
+        tweetedAt: details.tweetedAt || base.tweetedAt
+      };
+      await chrome.storage.local.set({ [storageKey]: nextRecord });
       if (activeSession !== session) {
         return;
       }
@@ -282,8 +285,9 @@
         replaceExisting: hasVisualMedia(details)
       });
     }
+    const nowMs = Date.now();
     if (
-      recordedFeedTweetIds.has(route.id) ||
+      isWithinMergeWindow(feedVisitTimes.get(route.id), nowMs) ||
       pendingFeedTweetIds.has(route.id)
     ) {
       return false;
@@ -291,7 +295,7 @@
 
     pendingFeedTweetIds.add(route.id);
     const storageKey = shared.makeStorageKey(route.id);
-    const now = new Date().toISOString();
+    const now = new Date(nowMs).toISOString();
 
     try {
       const stored = await chrome.storage.local.get(storageKey);
@@ -306,7 +310,11 @@
       );
 
       await chrome.storage.local.set({ [storageKey]: nextRecord });
-      recordedFeedTweetIds.add(route.id);
+      // 被合并时以实际保留的时间点为准，避免合并偏差随重复访问向后累积。
+      const keptTime = nextRecord.visits
+        .map((visit) => Date.parse(visit))
+        .find((time) => isWithinMergeWindow(time, nowMs));
+      feedVisitTimes.set(route.id, keptTime ?? nowMs);
       return true;
     } catch (error) {
       console.warn("[XRecall] 保存 Feed 交互推文失败", error);
@@ -314,6 +322,10 @@
     } finally {
       pendingFeedTweetIds.delete(route.id);
     }
+  }
+
+  function isWithinMergeWindow(time, now) {
+    return Math.abs(now - time) < shared.VISIT_MERGE_WINDOW_MS;
   }
 
   function saveArticleInteraction(article) {
@@ -844,7 +856,7 @@
     }
 
     for (const tweetId of shared.removedTweetIds(changes)) {
-      recordedFeedTweetIds.delete(tweetId);
+      feedVisitTimes.delete(tweetId);
       requestedPreviewTweetIds.delete(tweetId);
     }
   }

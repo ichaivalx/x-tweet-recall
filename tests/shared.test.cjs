@@ -125,19 +125,60 @@ test("宽松时间搜索理解今天和十二小时制时段", () => {
   );
 });
 
-test("记录时间优先使用最近记录时间，缺失时退回首次时间", () => {
-  assert.equal(
-    shared.getRecordTime({
-      firstVisitedAt: "2026-01-01T00:00:00.000Z",
-      lastVisitedAt: "2026-02-01T00:00:00.000Z"
-    }),
-    Date.parse("2026-02-01T00:00:00.000Z")
-  );
-  assert.equal(
-    shared.getRecordTime({ firstVisitedAt: "2026-01-01T00:00:00.000Z" }),
-    Date.parse("2026-01-01T00:00:00.000Z")
-  );
+test("每次看到都追加时间点，一分钟内重复看到合并为一次", () => {
+  let record = { visits: [] };
+  for (const visitedAt of [
+    "2026-01-01T08:00:00.000Z",
+    "2026-01-01T08:00:59.000Z",
+    "2026-01-01T08:01:00.000Z",
+    "2026-01-01T07:30:00.000Z"
+  ]) {
+    record = { visits: shared.addVisit(record, visitedAt) };
+  }
+
+  assert.deepEqual(Array.from(record.visits), [
+    "2026-01-01T07:30:00.000Z",
+    "2026-01-01T08:00:00.000Z",
+    "2026-01-01T08:01:00.000Z"
+  ]);
+  assert.equal(shared.getRecordTime(record), Date.parse("2026-01-01T08:01:00.000Z"));
   assert.ok(Number.isNaN(shared.getRecordTime({})));
+});
+
+test("列表按每个时间点展开成行，时间搜索只命中对应行，文字搜索返回该推文所有行", () => {
+  const repeated = {
+    id: "1",
+    url: "https://x.com/a/status/1",
+    visits: ["2026-01-01T08:00:00.000Z", "2026-01-03T08:00:00.000Z"]
+  };
+  const other = {
+    id: "2",
+    url: "https://x.com/b/status/2",
+    visits: ["2026-01-02T08:00:00.000Z"]
+  };
+  const rows = shared.buildVisitRows([repeated, other]);
+
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.visitedAt, row.visitCount]),
+    [
+      ["1", "2026-01-03T08:00:00.000Z", 2],
+      ["2", "2026-01-02T08:00:00.000Z", 1],
+      ["1", "2026-01-01T08:00:00.000Z", 2]
+    ]
+  );
+  assert.equal(rows[0].record, rows[2].record);
+
+  const text = (record) => record.url;
+  const firstDayLocal = new Date("2026-01-01T08:00:00.000Z");
+  const query = `${firstDayLocal.getMonth() + 1}月${firstDayLocal.getDate()}日`;
+  assert.deepEqual(
+    shared.filterVisitRows(rows, query, text).map((row) => row.key),
+    ["1@2026-01-01T08:00:00.000Z"]
+  );
+  assert.deepEqual(
+    shared.filterVisitRows(rows, "x.com/a/", text).map((row) => row.key),
+    ["1@2026-01-03T08:00:00.000Z", "1@2026-01-01T08:00:00.000Z"]
+  );
 });
 
 test("只把被移除的推文记录识别为删除", () => {

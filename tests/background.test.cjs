@@ -14,6 +14,7 @@ const backgroundScript = fs.readFileSync(
 
 function createBackgroundHarness({ previewExistsInitially = false } = {}) {
   let messageListener = null;
+  let installedListener = null;
   const stored = {
     "xRecall:setting:showPreviews": true,
     "xRecall:tweet:24680": {
@@ -84,6 +85,11 @@ function createBackgroundHarness({ previewExistsInitially = false } = {}) {
     },
     chrome: {
       runtime: {
+        onInstalled: {
+          addListener(listener) {
+            installedListener = listener;
+          }
+        },
         onMessage: {
           addListener(listener) {
             messageListener = listener;
@@ -113,6 +119,9 @@ function createBackgroundHarness({ previewExistsInitially = false } = {}) {
               return Object.hasOwn(stored, key) ? { [key]: stored[key] } : {};
             }
             return { ...stored };
+          },
+          async set(items) {
+            Object.assign(stored, items);
           },
           async remove(keys) {
             for (const key of keys) {
@@ -150,6 +159,10 @@ function createBackgroundHarness({ previewExistsInitially = false } = {}) {
   return {
     send,
     stored,
+    async install() {
+      await installedListener();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
     writtenPreviews,
     removedKeys,
     deletedPreviewIds,
@@ -221,19 +234,16 @@ test("清除全部数据会同时删除推文记录与预览文件", async () =>
   assert.equal(harness.stored["xRecall:setting:showPreviews"], true);
 });
 
-test("按时间删除只移除早于截止时间的推文及其预览", async () => {
+test("按时间删除只移除早于截止时间的时间点，没有剩余时间点的推文连同预览删除", async () => {
   const harness = createBackgroundHarness();
-  harness.stored["xRecall:tweet:24680"].lastVisitedAt = "2026-10-10T08:00:00.000Z";
+  harness.stored["xRecall:tweet:24680"].visits = [
+    "2026-07-01T08:00:00.000Z",
+    "2026-10-10T08:00:00.000Z"
+  ];
   harness.stored["xRecall:tweet:111"] = {
     id: "111",
     url: "https://x.com/old/status/111",
-    firstVisitedAt: "2026-06-01T08:00:00.000Z",
-    lastVisitedAt: "2026-08-01T08:00:00.000Z"
-  };
-  harness.stored["xRecall:tweet:222"] = {
-    id: "222",
-    url: "https://x.com/older/status/222",
-    firstVisitedAt: "2026-05-01T08:00:00.000Z"
+    visits: ["2026-06-01T08:00:00.000Z", "2026-08-01T08:00:00.000Z"]
   };
 
   const result = await harness.send({
@@ -242,15 +252,38 @@ test("按时间删除只移除早于截止时间的推文及其预览", async ()
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.deletedRecords, 2);
-  assert.deepEqual(harness.removedKeys.sort(), [
-    "xRecall:tweet:111",
-    "xRecall:tweet:222"
+  assert.equal(result.deletedRecords, 1);
+  assert.equal(result.deletedVisits, 3);
+  assert.deepEqual(harness.removedKeys, ["xRecall:tweet:111"]);
+  assert.deepEqual(harness.deletedPreviewIds, ["111"]);
+  assert.deepEqual(Array.from(harness.stored["xRecall:tweet:24680"].visits), [
+    "2026-10-10T08:00:00.000Z"
   ]);
-  assert.deepEqual(harness.deletedPreviewIds.sort(), ["111", "222"]);
-  assert.ok(harness.stored["xRecall:tweet:24680"]);
   assert.equal(harness.stored["xRecall:setting:showPreviews"], true);
   assert.equal(harness.previewsCleared, false);
+});
+
+test("安装或更新时把旧版首次、最近时间转换为时间点列表", async () => {
+  const harness = createBackgroundHarness();
+  harness.stored["xRecall:tweet:111"] = {
+    schemaVersion: 1,
+    id: "111",
+    url: "https://x.com/old/status/111",
+    text: "旧正文",
+    firstVisitedAt: "2026-06-01T08:00:00.000Z",
+    lastVisitedAt: "2026-08-01T08:00:00.000Z",
+    visitCount: 4
+  };
+
+  await harness.install();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.stored["xRecall:tweet:111"])), {
+    schemaVersion: 2,
+    id: "111",
+    url: "https://x.com/old/status/111",
+    text: "旧正文",
+    visits: ["2026-06-01T08:00:00.000Z", "2026-08-01T08:00:00.000Z"]
+  });
 });
 
 test("按时间删除拒绝无效的截止时间", async () => {

@@ -2,6 +2,9 @@
   "use strict";
 
   const STORAGE_PREFIX = "xRecall:tweet:";
+  const RECORD_SCHEMA_VERSION = 2;
+  // 距上一次记下的时间不足这个间隔时视为同一次看到，不再新增时间点。
+  const VISIT_MERGE_WINDOW_MS = 60_000;
 
   function isXHost(hostname) {
     const host = String(hostname || "").toLowerCase();
@@ -76,9 +79,65 @@
       .map(([key]) => key.slice(STORAGE_PREFIX.length));
   }
 
+  function getRecordVisits(record) {
+    const visits = Array.isArray(record?.visits) ? record.visits : [];
+    return visits
+      .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
+      .sort((left, right) => Date.parse(left) - Date.parse(right));
+  }
+
+  function addVisit(record, visitedAt) {
+    const visits = getRecordVisits(record);
+    const time = Date.parse(visitedAt);
+    if (!Number.isFinite(time)) {
+      return visits;
+    }
+    const merged = visits.some(
+      (value) => Math.abs(Date.parse(value) - time) < VISIT_MERGE_WINDOW_MS
+    );
+    return merged ? visits : getRecordVisits({ visits: [...visits, visitedAt] });
+  }
+
+  // 每个访问时间点展开为一行，按时间倒序；同一推文的各行共用同一记录对象。
+  function buildVisitRows(records) {
+    const rows = [];
+    for (const record of records) {
+      const id = String(record.id);
+      const visits = getRecordVisits(record);
+      for (const visitedAt of visits) {
+        rows.push({
+          key: makeVisitRowKey(id, visitedAt),
+          id,
+          record,
+          visitedAt,
+          visitCount: visits.length,
+          time: Date.parse(visitedAt)
+        });
+      }
+    }
+    return rows.sort((left, right) => right.time - left.time);
+  }
+
+  // 时间搜索按每行自己的时间点匹配；文字搜索返回匹配推文的所有行。
+  function filterVisitRows(rows, rawQuery, searchableText) {
+    if (!rawQuery) {
+      return rows;
+    }
+
+    const query = rawQuery.toLocaleLowerCase("zh-CN");
+    if (isLooseTimeQuery(query)) {
+      return rows.filter((row) => matchesLooseLocalTimeQuery(rawQuery, [row.visitedAt]));
+    }
+    return rows.filter((row) => searchableText(row.record).includes(query));
+  }
+
+  function makeVisitRowKey(id, visitedAt) {
+    return `${id}@${visitedAt}`;
+  }
+
   function getRecordTime(record) {
-    const time = Date.parse(record?.lastVisitedAt || record?.firstVisitedAt || "");
-    return Number.isFinite(time) ? time : Number.NaN;
+    const visits = getRecordVisits(record);
+    return visits.length ? Date.parse(visits[visits.length - 1]) : Number.NaN;
   }
 
   function advanceAttentionClock(state, now) {
@@ -342,12 +401,19 @@
 
   const api = Object.freeze({
     STORAGE_PREFIX,
+    RECORD_SCHEMA_VERSION,
+    VISIT_MERGE_WINDOW_MS,
     isXHost,
     parseTweetRoute,
     makeStorageKey,
     isTweetRecord,
     isSamePage,
     removedTweetIds,
+    getRecordVisits,
+    addVisit,
+    buildVisitRows,
+    filterVisitRows,
+    makeVisitRowKey,
     getRecordTime,
     advanceAttentionClock,
     isLooseTimeQuery,

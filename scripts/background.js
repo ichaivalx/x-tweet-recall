@@ -20,6 +20,12 @@ const messageHandlers = {
   "xRecall:deleteRecordsBefore": (message) => deleteRecordsBefore(message.before)
 };
 
+chrome.runtime.onInstalled.addListener(() => {
+  void migrateRecords().catch((error) => {
+    console.warn("[XRecall] 转换旧版记录失败", error);
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = messageHandlers[message?.type];
   if (!handler) {
@@ -282,14 +288,55 @@ async function deleteRecordsBefore(before) {
     return { ok: false, reason: "invalid-request" };
   }
 
-  const expired = (await readTweetRecordEntries()).filter(
-    ([, value]) => shared.getRecordTime(value) < cutoff
-  );
-  if (expired.length) {
-    await chrome.storage.local.remove(expired.map(([key]) => key));
-    await previewDatabase.deletePreviews(expired.map(([, value]) => String(value.id)));
+  const removedKeys = [];
+  const removedIds = [];
+  const updates = {};
+  let deletedVisits = 0;
+  for (const [key, value] of await readTweetRecordEntries()) {
+    const visits = shared.getRecordVisits(value);
+    const kept = visits.filter((visit) => Date.parse(visit) >= cutoff);
+    deletedVisits += visits.length - kept.length;
+    if (!kept.length) {
+      removedKeys.push(key);
+      removedIds.push(String(value.id));
+    } else if (kept.length !== visits.length) {
+      updates[key] = { ...value, visits: kept };
+    }
   }
-  return { ok: true, deletedRecords: expired.length };
+
+  if (Object.keys(updates).length) {
+    await chrome.storage.local.set(updates);
+  }
+  if (removedKeys.length) {
+    await chrome.storage.local.remove(removedKeys);
+    await previewDatabase.deletePreviews(removedIds);
+  }
+  return { ok: true, deletedRecords: removedKeys.length, deletedVisits };
+}
+
+// 旧版每条推文只保存首次和最近两个时间，转换为访问时间列表。
+async function migrateRecords() {
+  const updates = {};
+  for (const [key, value] of await readTweetRecordEntries()) {
+    if (Array.isArray(value.visits)) {
+      continue;
+    }
+    const { firstVisitedAt, lastVisitedAt, visitCount, ...rest } = value;
+    let visits = [];
+    for (const visitedAt of [firstVisitedAt, lastVisitedAt]) {
+      if (typeof visitedAt === "string") {
+        visits = shared.addVisit({ visits }, visitedAt);
+      }
+    }
+    updates[key] = {
+      ...rest,
+      schemaVersion: shared.RECORD_SCHEMA_VERSION,
+      visits
+    };
+  }
+  if (Object.keys(updates).length) {
+    await chrome.storage.local.set(updates);
+  }
 }
 
 function isAllowedXTab(tab) {

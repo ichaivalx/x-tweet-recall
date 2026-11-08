@@ -55,18 +55,20 @@
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const recordsById = new Map();
+  // 列表每一行对应一次访问，键为“推文 ID@访问时间”；同一推文的多行共用一份记录和预览。
   const recordViews = new Map();
+  const viewKeysByTweet = new Map();
   const previewTargets = new Map();
   const previewUrls = new Map();
   const searchTextCache = new WeakMap();
   const copyResetTimers = new WeakMap();
-  let records = [];
+  let visitRows = [];
   let recordsLoaded = false;
   let loadError = "";
   let pendingChanges = [];
   let changeRenderTimer = 0;
-  let visibleRecords = [];
-  let visibleRecordsStale = true;
+  let visibleRows = [];
+  let visibleRowsStale = true;
   let renderedQuery = "";
   let renderLimit = FIRST_PAGE_SIZE;
   let fillHandle = 0;
@@ -181,7 +183,7 @@
       recordsLoaded = true;
       pendingChanges.forEach(applyRecordChanges);
       pendingChanges = [];
-      records = sortRecords(recordsById.values());
+      visitRows = shared.buildVisitRows(recordsById.values());
     } catch (error) {
       console.warn("[XRecall] 读取记录失败", error);
       loadError = "读取记录失败";
@@ -199,8 +201,8 @@
     }
 
     applyRecordChanges(changes);
-    records = sortRecords(recordsById.values());
-    visibleRecordsStale = true;
+    visitRows = shared.buildVisitRows(recordsById.values());
+    visibleRowsStale = true;
     window.clearTimeout(changeRenderTimer);
     changeRenderTimer = window.setTimeout(() => {
       render();
@@ -219,32 +221,18 @@
       const id = key.slice(shared.STORAGE_PREFIX.length);
       if (shared.isTweetRecord(change.newValue)) {
         recordsById.set(id, change.newValue);
+        const keptKeys = new Set(
+          shared
+            .getRecordVisits(change.newValue)
+            .map((visitedAt) => shared.makeVisitRowKey(id, visitedAt))
+        );
+        forgetTweetViews(id, keptKeys);
       } else {
         recordsById.delete(id);
-        forgetRecordView(id);
+        forgetTweetViews(id);
+        forgetPreviewUrl(id);
       }
     }
-  }
-
-  function sortRecords(values) {
-    const sortTime = (record) => shared.getRecordTime(record) || 0;
-    return Array.from(values).sort((left, right) => sortTime(right) - sortTime(left));
-  }
-
-  function filterRecords(rawQuery) {
-    if (!rawQuery) {
-      return records;
-    }
-
-    const query = rawQuery.toLocaleLowerCase("zh-CN");
-    if (shared.isLooseTimeQuery(query)) {
-      return records.filter((record) =>
-        shared.matchesLooseLocalTimeQuery(rawQuery, [
-          record.lastVisitedAt || record.firstVisitedAt
-        ])
-      );
-    }
-    return records.filter((record) => searchableText(record).includes(query));
   }
 
   function searchableText(record) {
@@ -268,15 +256,15 @@
     if (queryChanged) {
       renderedQuery = rawQuery;
       renderLimit = FIRST_PAGE_SIZE;
-      visibleRecordsStale = true;
+      visibleRowsStale = true;
     }
-    if (visibleRecordsStale) {
-      visibleRecords = filterRecords(rawQuery);
-      visibleRecordsStale = false;
+    if (visibleRowsStale) {
+      visibleRows = shared.filterVisitRows(visitRows, rawQuery, searchableText);
+      visibleRowsStale = false;
     }
 
-    elements.cleanupButton.disabled = records.length === 0;
-    if (!visibleRecords.length) {
+    elements.cleanupButton.disabled = visitRows.length === 0;
+    if (!visibleRows.length) {
       syncRecordList([]);
       elements.records.hidden = true;
       elements.empty.hidden = !recordsLoaded && !loadError;
@@ -288,7 +276,7 @@
 
     elements.empty.hidden = true;
     elements.records.hidden = false;
-    syncRecordList(visibleRecords.slice(0, renderLimit));
+    syncRecordList(visibleRows.slice(0, renderLimit));
     if (queryChanged) {
       elements.records.scrollTop = 0;
     }
@@ -297,7 +285,7 @@
   }
 
   function hasMoreRecords() {
-    return visibleRecords.length > renderLimit;
+    return visibleRows.length > renderLimit;
   }
 
   function growRenderLimit(size) {
@@ -333,12 +321,12 @@
     }
   }
 
-  function syncRecordList(nextRecords) {
+  function syncRecordList(nextEntries) {
     const container = elements.records;
     let cursor = container.firstElementChild;
 
-    for (const record of nextRecords) {
-      const article = recordView(record);
+    for (const entry of nextEntries) {
+      const article = recordView(entry);
       if (cursor && !cursor.isConnected) {
         // 记录内容更新时，新卡片已原位替换旧卡片。
         cursor = article;
@@ -357,30 +345,51 @@
     }
   }
 
-  function recordView(record) {
-    const id = String(record.id);
-    const existing = recordViews.get(id);
-    if (existing?.record === record) {
+  function recordView(entry) {
+    const existing = recordViews.get(entry.key);
+    if (existing?.record === entry.record) {
       return existing.article;
     }
 
-    const article = createRecordElement(record);
+    const article = createRecordElement(entry);
     if (existing) {
       detachPreviewTarget(existing.article);
       existing.article.replaceWith(article);
     }
-    recordViews.set(id, { record, article });
+    recordViews.set(entry.key, { record: entry.record, article });
+    let keys = viewKeysByTweet.get(entry.id);
+    if (!keys) {
+      keys = new Set();
+      viewKeysByTweet.set(entry.id, keys);
+    }
+    keys.add(entry.key);
     return article;
   }
 
-  function forgetRecordView(id) {
-    const existing = recordViews.get(id);
-    if (existing) {
-      detachPreviewTarget(existing.article);
-      existing.article.remove();
-      recordViews.delete(id);
+  function forgetTweetViews(id, keptKeys = new Set()) {
+    const keys = viewKeysByTweet.get(id);
+    if (!keys) {
+      return;
     }
 
+    for (const key of keys) {
+      if (keptKeys.has(key)) {
+        continue;
+      }
+      const existing = recordViews.get(key);
+      if (existing) {
+        detachPreviewTarget(existing.article);
+        existing.article.remove();
+        recordViews.delete(key);
+      }
+      keys.delete(key);
+    }
+    if (!keys.size) {
+      viewKeysByTweet.delete(id);
+    }
+  }
+
+  function forgetPreviewUrl(id) {
     const objectUrl = previewUrls.get(id);
     if (objectUrl) {
       URL.revokeObjectURL(objectUrl);
@@ -388,7 +397,8 @@
     }
   }
 
-  function createRecordElement(record) {
+  function createRecordElement(entry) {
+    const { record, visitedAt } = entry;
     const article = createElement("article", "record");
     const content = createElement("div", "record__content");
     const identity = createElement("div", "record__identity");
@@ -401,19 +411,16 @@
       identity.appendChild(createElement("span", "record__handle", `@${handleName}`));
     }
 
-    const visitTimestamp = record.lastVisitedAt || record.firstVisitedAt || "";
-    if (isValidDate(visitTimestamp)) {
-      const visitTime = createElement(
-        "time",
-        "record__time",
-        formatCompactLocalTime(visitTimestamp)
-      );
-      const title = buildVisitTimeTitle(record);
-      visitTime.dateTime = visitTimestamp;
-      visitTime.title = title;
-      visitTime.setAttribute("aria-label", title);
-      identity.appendChild(visitTime);
-    }
+    const visitTime = createElement(
+      "time",
+      "record__time",
+      formatCompactLocalTime(visitedAt)
+    );
+    const title = buildVisitTimeTitle(entry);
+    visitTime.dateTime = visitedAt;
+    visitTime.title = title;
+    visitTime.setAttribute("aria-label", title);
+    identity.appendChild(visitTime);
 
     content.append(
       identity,
@@ -588,18 +595,19 @@
   }
 
   function handlePreviewStored(tweetId) {
-    const oldUrl = previewUrls.get(tweetId);
-    if (oldUrl) {
-      URL.revokeObjectURL(oldUrl);
-      previewUrls.delete(tweetId);
-    }
+    forgetPreviewUrl(tweetId);
 
-    const view = recordViews.get(tweetId);
-    const entry = view && previewTargets.get(view.article);
-    if (entry) {
+    for (const key of viewKeysByTweet.get(tweetId) || []) {
+      const view = recordViews.get(key);
+      const entry = view && previewTargets.get(view.article);
+      if (!entry) {
+        continue;
+      }
       entry.preview.dataset.state = "idle";
-      if (previewsVisible) {
+      if (previewsVisible && entry.article.isConnected) {
         void loadPreview(entry);
+      } else {
+        previewObserver?.observe(entry.article);
       }
     }
   }
@@ -686,7 +694,7 @@
   function openCleanup() {
     elements.cleanup.hidden = false;
     elements.cleanupButton.setAttribute("aria-expanded", "true");
-    elements.cleanupSummary.textContent = `共 ${records.length} 条记录`;
+    elements.cleanupSummary.textContent = `共 ${visitRows.length} 条记录`;
     showCleanupOptions();
     void loadCleanupSummary();
   }
@@ -706,7 +714,7 @@
       const previewCount = Number(stats?.count) || 0;
       if (stats?.ok && previewCount && !elements.cleanup.hidden) {
         elements.cleanupSummary.textContent =
-          `共 ${records.length} 条记录，${previewCount} 张预览占用 ${formatBytes(Number(stats.bytes) || 0)}`;
+          `共 ${visitRows.length} 条记录，${previewCount} 张预览占用 ${formatBytes(Number(stats.bytes) || 0)}`;
       }
     } catch (error) {
       console.warn("[XRecall] 读取占用空间失败", error);
@@ -755,8 +763,8 @@
     elements.cleanupConfirm.hidden = false;
     showCleanupMessage(
       range.cutoff
-        ? `删除最近一次记录早于 ${formatCutoffDate(cutoff)} 的 ${count} 条推文和对应预览？删除后无法恢复。`
-        : `删除全部 ${count} 条推文和所有预览？删除后无法恢复。`
+        ? `删除早于 ${formatCutoffDate(cutoff)} 的 ${count} 条记录？之后没再出现过的推文会连同预览一起删除，删除后无法恢复。`
+        : `删除全部 ${count} 条记录和所有预览？删除后无法恢复。`
     );
     setCleanupButtons(`删除 ${count} 条`, false);
     elements.cleanupCancel.focus();
@@ -805,10 +813,7 @@
   }
 
   function countRecordsBefore(cutoff) {
-    return records.reduce(
-      (count, record) => count + (shared.getRecordTime(record) < cutoff ? 1 : 0),
-      0
-    );
+    return visitRows.reduce((count, entry) => count + (entry.time < cutoff ? 1 : 0), 0);
   }
 
   function shiftDays(date, days) {
@@ -859,10 +864,6 @@
 
   // ---- 时间与数字格式 ----
 
-  function isValidDate(value) {
-    return Number.isFinite(Date.parse(value || ""));
-  }
-
   function formatCompactLocalTime(value) {
     const date = new Date(value);
     const now = new Date();
@@ -894,14 +895,10 @@
     return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${clockFormat.format(date)}`;
   }
 
-  function buildVisitTimeTitle(record) {
-    const latest = record.lastVisitedAt || record.firstVisitedAt;
-    const parts = [`最近记录：${exactFormat.format(new Date(latest))}`];
-    if (isValidDate(record.firstVisitedAt) && record.firstVisitedAt !== latest) {
-      parts.push(`首次记录：${exactFormat.format(new Date(record.firstVisitedAt))}`);
-    }
-    if (Number(record.visitCount) > 1) {
-      parts.push(`共记录 ${record.visitCount} 次`);
+  function buildVisitTimeTitle(entry) {
+    const parts = [`记录时间：${exactFormat.format(new Date(entry.visitedAt))}`];
+    if (entry.visitCount > 1) {
+      parts.push(`这条推文共记录 ${entry.visitCount} 次`);
     }
     return parts.join("；");
   }

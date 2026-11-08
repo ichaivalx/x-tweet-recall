@@ -168,6 +168,12 @@ async function runFeedScenario(action) {
   const intervalCallbacks = new Map();
   const videoListeners = new Map();
   let now = 0;
+  let intersectionObserver = null;
+  class ScenarioDate extends Date {
+    static now() {
+      return Date.parse("2026-08-16T09:00:00.000Z") + now;
+    }
+  }
   let articleTop = action === "dwell-below-visibility" ? 500 : 100;
   const time = {
     getAttribute(name) {
@@ -299,7 +305,7 @@ async function runFeedScenario(action) {
   const sandbox = {
     XTweetRecall: shared,
     URL,
-    Date,
+    Date: ScenarioDate,
     console,
     queueMicrotask,
     window: {
@@ -356,6 +362,7 @@ async function runFeedScenario(action) {
     IntersectionObserver: class IntersectionObserver {
       constructor(callback) {
         this.callback = callback;
+        intersectionObserver = this;
       }
       observe(target) {
         this.callback([
@@ -398,6 +405,46 @@ async function runFeedScenario(action) {
     listeners.get("click")({ isTrusted: true, target });
   } else if (action === "media-grid-click") {
     listeners.get("click")({ isTrusted: true, target: gridImage });
+  } else if (action === "dwell-return" || action === "dwell-partial-return") {
+    const intersect = (isIntersecting) =>
+      intersectionObserver.callback([
+        {
+          target: article,
+          isIntersecting,
+          intersectionRatio: isIntersecting ? 1 : 0,
+          boundingClientRect: article.getBoundingClientRect()
+        }
+      ]);
+    const partiallyIntersect = () => {
+      articleTop = 500;
+      intersectionObserver.callback([
+        {
+          target: article,
+          isIntersecting: true,
+          intersectionRatio: 0.42,
+          boundingClientRect: article.getBoundingClientRect()
+        }
+      ]);
+      articleTop = 100;
+    };
+    const dwell = async () => {
+      const start = now;
+      for (let tick = 1; tick <= 11; tick += 1) {
+        now = start + tick * 250;
+        intervalCallbacks.get(250)();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    await dwell();
+    now += 61_000;
+    // 在两次采样之间滑出（或只剩不到一半可见）又滑回。
+    if (action === "dwell-partial-return") {
+      partiallyIntersect();
+    } else {
+      intersect(false);
+    }
+    intersect(true);
+    await dwell();
   } else if (action === "dwell-resume") {
     now = 250;
     intervalCallbacks.get(250)();
@@ -450,7 +497,7 @@ test("进入具体推文后，会在正文补全前先保存链接", async () =>
     writes[0]["xRecall:tweet:123456789"].url,
     "https://x.com/example/status/123456789"
   );
-  assert.equal(writes[0]["xRecall:tweet:123456789"].visitCount, 1);
+  assert.equal(writes[0]["xRecall:tweet:123456789"].visits.length, 1);
 });
 
 test("直接进入图片查看器时，会先把记录标记为图片", async () => {
@@ -510,6 +557,11 @@ test("滚动中的媒体推文有效可见二点五秒后会保存", async () =>
   );
 });
 
+test("记录后在两次采样之间滑出又滑回，再次停留会追加新的时间点", async () => {
+  assert.equal((await runFeedScenario("dwell-return")).length, 2);
+  assert.equal((await runFeedScenario("dwell-partial-return")).length, 2);
+});
+
 test("推文有效可见不足二点五秒时不会提前保存", async () => {
   const writes = await runFeedScenario("dwell-short");
   assert.equal(writes.length, 0);
@@ -567,10 +619,10 @@ test("记录过程不会向 X 页面插入提示界面", () => {
   assert.doesNotMatch(contentScripts, /showToast|createElement\(|save-toast/);
 });
 
-test("再次进入同一条推文时保留首次时间并更新最近时间", async () => {
+test("再次进入同一条推文时追加新的时间点并保留以前的时间点", async () => {
   const key = "xRecall:tweet:123456789";
   const existing = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "123456789",
     url: "https://x.com/example/status/123456789",
     handle: "example",
@@ -578,9 +630,7 @@ test("再次进入同一条推文时保留首次时间并更新最近时间", as
     text: "原有正文",
     media: [],
     tweetedAt: "",
-    firstVisitedAt: "2026-07-01T08:00:00.000Z",
-    lastVisitedAt: "2026-07-02T09:30:00.000Z",
-    visitCount: 2
+    visits: ["2026-07-01T08:00:00.000Z", "2026-07-02T09:30:00.000Z"]
   };
   const writes = await runContentScriptAt(
     "https://x.com/example/status/123456789",
@@ -588,8 +638,75 @@ test("再次进入同一条推文时保留首次时间并更新最近时间", as
   );
   const updated = writes[0][key];
 
-  assert.equal(updated.firstVisitedAt, existing.firstVisitedAt);
-  assert.notEqual(updated.lastVisitedAt, existing.lastVisitedAt);
-  assert.equal(updated.visitCount, 3);
+  assert.equal(updated.visits.length, 3);
+  assert.deepEqual(Array.from(updated.visits.slice(0, 2)), existing.visits);
   assert.equal(updated.text, existing.text);
+});
+
+test("Feed 重复交互被合并后，不会把合并偏差拖到一分钟以上", async () => {
+  const key = "xRecall:tweet:24680";
+  const storedItems = {
+    [key]: {
+      schemaVersion: 2,
+      id: "24680",
+      url: "https://x.com/example/status/24680",
+      visits: ["2026-07-01T08:00:00.000Z"]
+    }
+  };
+  let nowMs = 0;
+  class FakeDate extends Date {
+    static now() {
+      return nowMs;
+    }
+  }
+  const sandbox = {
+    XTweetRecall: shared,
+    URL,
+    Date: FakeDate,
+    console,
+    queueMicrotask,
+    window: {
+      location: { href: "https://x.com/home" },
+      setInterval() {
+        return 1;
+      },
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {}
+    },
+    document: {
+      documentElement: {},
+      querySelectorAll() {
+        return [];
+      }
+    },
+    MutationObserver: class MutationObserver {
+      observe() {}
+    },
+    chrome: {
+      storage: {
+        local: {
+          async get(storageKey) {
+            return { [storageKey]: storedItems[storageKey] };
+          },
+          async set(items) {
+            Object.assign(storedItems, items);
+          }
+        }
+      }
+    }
+  };
+  vm.runInNewContext(recorderScript, sandbox, { filename: "recorder.js" });
+  const route = shared.parseTweetRoute("https://x.com/example/status/24680");
+
+  for (const time of ["2026-07-01T08:00:50.000Z", "2026-07-01T08:01:40.000Z"]) {
+    nowMs = Date.parse(time);
+    await sandbox.XRecallRecorder.recordContext({ route });
+  }
+
+  assert.deepEqual(Array.from(storedItems[key].visits), [
+    "2026-07-01T08:00:00.000Z",
+    "2026-07-01T08:01:40.000Z"
+  ]);
 });

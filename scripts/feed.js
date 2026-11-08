@@ -19,6 +19,7 @@
   const observedArticles = new WeakSet();
   const visibleArticles = new Map();
   const visibleDwellClocks = new Map();
+  // 本次停留已记录过的推文；离开视口后移除，下次再滚到时重新计时记录。
   const dwellRecordedTweetIds = new Set();
 
   function closestTweetArticle(target) {
@@ -218,10 +219,40 @@
     for (const entry of entries) {
       if (!entry.isIntersecting || entry.intersectionRatio <= 0) {
         visibleArticles.delete(entry.target);
+        rearmDwellAfterLeaving(entry.target);
       } else {
         visibleArticles.set(entry.target, entry.boundingClientRect);
+        if (!isArticleMeaningfullyVisible(entry.boundingClientRect, viewportHeight())) {
+          rearmDwellAfterLeaving(entry.target);
+        }
       }
     }
+  }
+
+  // 失去有效可见后立即允许重新计时，避免在两次采样之间滑出又滑回时漏记。
+  function rearmDwellAfterLeaving(article) {
+    const tweetId = recorder.getArticleContext(article)?.route.id;
+    if (!tweetId || !dwellRecordedTweetIds.has(tweetId)) {
+      return;
+    }
+    const height = viewportHeight();
+    for (const [visibleArticle, observedRect] of visibleArticles) {
+      if (
+        visibleArticle !== article &&
+        recorder.getArticleContext(visibleArticle)?.route.id === tweetId &&
+        isArticleMeaningfullyVisible(
+          visibleArticle.getBoundingClientRect?.() || observedRect,
+          height
+        )
+      ) {
+        return;
+      }
+    }
+    dwellRecordedTweetIds.delete(tweetId);
+  }
+
+  function viewportHeight() {
+    return window.innerHeight || document.documentElement?.clientHeight || 0;
   }
 
   const articleObserver =
@@ -278,30 +309,31 @@
     }
   }
 
-  function isArticleMeaningfullyVisible(rect, viewportHeight) {
-    if (!rect || rect.height <= 0 || viewportHeight <= 0) {
+  function isArticleMeaningfullyVisible(rect, visibleAreaHeight) {
+    if (!rect || rect.height <= 0 || visibleAreaHeight <= 0) {
       return false;
     }
 
     const visibleHeight = Math.max(
       0,
-      Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0)
+      Math.min(rect.bottom, visibleAreaHeight) - Math.max(rect.top, 0)
     );
     return (
       visibleHeight / rect.height >= MIN_ARTICLE_VISIBLE_RATIO ||
-      visibleHeight >= viewportHeight * MIN_VIEWPORT_COVERAGE_RATIO
+      visibleHeight >= visibleAreaHeight * MIN_VIEWPORT_COVERAGE_RATIO
     );
   }
 
   function sampleArticleDwell(now) {
     if (!allowsPassiveDwellOnCurrentPage()) {
       visibleDwellClocks.clear();
+      dwellRecordedTweetIds.clear();
       return;
     }
 
-    const viewportHeight =
-      window.innerHeight || document.documentElement?.clientHeight || 0;
+    const height = viewportHeight();
     const activeTweetIds = new Set();
+    const visibleTweetIds = new Set();
 
     for (const [article, observedRect] of visibleArticles) {
       if (article.isConnected === false) {
@@ -311,16 +343,17 @@
 
       const context = recorder.getPassiveContext(article);
       const tweetId = context?.route.id;
-      if (
-        !tweetId ||
-        dwellRecordedTweetIds.has(tweetId) ||
-        activeTweetIds.has(tweetId)
-      ) {
+      if (!tweetId || activeTweetIds.has(tweetId)) {
         continue;
       }
 
       const rect = article.getBoundingClientRect?.() || observedRect;
-      if (!isArticleMeaningfullyVisible(rect, viewportHeight)) {
+      if (!isArticleMeaningfullyVisible(rect, height)) {
+        continue;
+      }
+
+      visibleTweetIds.add(tweetId);
+      if (dwellRecordedTweetIds.has(tweetId)) {
         continue;
       }
 
@@ -344,6 +377,11 @@
     for (const tweetId of visibleDwellClocks.keys()) {
       if (!activeTweetIds.has(tweetId)) {
         visibleDwellClocks.delete(tweetId);
+      }
+    }
+    for (const tweetId of dwellRecordedTweetIds) {
+      if (!visibleTweetIds.has(tweetId)) {
+        dwellRecordedTweetIds.delete(tweetId);
       }
     }
   }
